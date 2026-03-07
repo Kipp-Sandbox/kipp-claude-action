@@ -7,9 +7,9 @@
  */
 
 import * as core from "@actions/core";
-import { dirname } from "path";
+import { dirname, join } from "path";
 import { spawn } from "child_process";
-import { appendFile } from "fs/promises";
+import { appendFile, writeFile } from "fs/promises";
 import { existsSync, readFileSync } from "fs";
 import { setupGitHubToken, WorkflowValidationSkipError } from "../github/token";
 import { checkWritePermissions } from "../github/validation/permissions";
@@ -25,6 +25,13 @@ import { collectActionInputsPresence } from "./collect-inputs";
 import { updateCommentLink } from "./update-comment-link";
 import { formatTurnsFromData } from "./format-turns";
 import type { Turn } from "./format-turns";
+import { splitSlashCommands } from "../utils/extract-user-request";
+import {
+  fetchGitHubData,
+  extractOriginalTitle,
+  extractOriginalBody,
+} from "../github/data/fetcher";
+import { createPrompt } from "../create-prompt";
 // Base-action imports (used directly instead of subprocess)
 import { validateEnvironmentVariables } from "../../base-action/src/validate-env";
 import { setupClaudeCodeSettings } from "../../base-action/src/setup-claude-code-settings";
@@ -233,29 +240,154 @@ async function run() {
       promptFile,
     });
 
-    const claudeResult: ClaudeRunResult = await runClaude(promptConfig.path, {
+    const claudeOptions = {
       claudeArgs: prepareResult.claudeArgs,
       appendSystemPrompt: process.env.APPEND_SYSTEM_PROMPT,
       model: process.env.ANTHROPIC_MODEL,
       pathToClaudeCodeExecutable:
         process.env.INPUT_PATH_TO_CLAUDE_CODE_EXECUTABLE,
       showFullOutput: process.env.INPUT_SHOW_FULL_OUTPUT,
-    });
+    };
 
-    claudeSuccess = claudeResult.conclusion === "success";
-    executionFile = claudeResult.executionFile;
+    // Check for multiple slash commands in tag mode
+    const promptDir = dirname(promptConfig.path);
+    const userRequestPath = join(promptDir, "claude-user-request.txt");
+    const hasMultipleCommands =
+      modeName === "tag" &&
+      isEntityContext(context) &&
+      existsSync(userRequestPath);
 
-    // Set action-level outputs
-    if (claudeResult.executionFile) {
-      core.setOutput("execution_file", claudeResult.executionFile);
+    let commands: string[] | undefined;
+    if (hasMultipleCommands) {
+      const userRequestContent = readFileSync(userRequestPath, "utf-8");
+      const split = splitSlashCommands(userRequestContent);
+      if (split.length > 1) {
+        commands = split;
+      }
     }
-    if (claudeResult.sessionId) {
-      core.setOutput("session_id", claudeResult.sessionId);
+
+    if (commands && commands.length > 1 && isEntityContext(context)) {
+      // Multi-command execution for tag mode
+      const accumulatedOutput: Turn[] = [];
+      let lastClaudeResult: ClaudeRunResult | undefined;
+
+      for (let i = 0; i < commands.length; i++) {
+        const command = commands[i]!;
+        console.log(
+          `Running command ${i + 1}/${commands.length}: ${command.split("\n")[0]}`,
+        );
+
+        // For commands after the first, re-fetch GitHub data and regenerate prompt
+        if (i > 0) {
+          const originalTitle = extractOriginalTitle(context);
+          const originalBody = extractOriginalBody(context);
+
+          const freshGithubData = await fetchGitHubData({
+            octokits: octokit,
+            repository: `${context.repository.owner}/${context.repository.repo}`,
+            prNumber: context.entityNumber.toString(),
+            isPR: context.isPR,
+            triggerUsername: context.actor,
+            triggerTime: undefined, // Include Claude's own comments from prior commands
+            originalTitle,
+            originalBody,
+            includeCommentsByActor: context.inputs.includeCommentsByActor,
+            excludeCommentsByActor: context.inputs.excludeCommentsByActor,
+          });
+
+          await createPrompt(
+            prepareResult.commentId!, // Always defined in tag mode
+            prepareResult.branchInfo.baseBranch,
+            prepareResult.branchInfo.claudeBranch,
+            freshGithubData,
+            context,
+          );
+        }
+
+        // Overwrite the user request file with the current command
+        await writeFile(userRequestPath, command);
+
+        const claudeResult: ClaudeRunResult = await runClaude(
+          promptConfig.path,
+          claudeOptions,
+        );
+        lastClaudeResult = claudeResult;
+
+        // Accumulate execution output
+        if (
+          claudeResult.executionFile &&
+          existsSync(claudeResult.executionFile)
+        ) {
+          try {
+            const data: Turn[] = JSON.parse(
+              readFileSync(claudeResult.executionFile, "utf-8"),
+            );
+            accumulatedOutput.push(...data);
+          } catch {
+            console.warn(
+              `Failed to parse execution output for command ${i + 1}`,
+            );
+          }
+        }
+
+        // Stop on failure
+        if (claudeResult.conclusion !== "success") {
+          console.log(
+            `Command ${i + 1} failed, stopping execution of remaining commands`,
+          );
+          break;
+        }
+      }
+
+      // Use results from the last command run
+      if (lastClaudeResult) {
+        claudeSuccess = lastClaudeResult.conclusion === "success";
+        executionFile = lastClaudeResult.executionFile;
+
+        if (lastClaudeResult.executionFile) {
+          core.setOutput("execution_file", lastClaudeResult.executionFile);
+        }
+        if (lastClaudeResult.sessionId) {
+          core.setOutput("session_id", lastClaudeResult.sessionId);
+        }
+        if (lastClaudeResult.structuredOutput) {
+          core.setOutput(
+            "structured_output",
+            lastClaudeResult.structuredOutput,
+          );
+        }
+        core.setOutput("conclusion", lastClaudeResult.conclusion);
+
+        // Write accumulated output back so the step summary includes all commands
+        if (executionFile && accumulatedOutput.length > 0) {
+          try {
+            await writeFile(executionFile, JSON.stringify(accumulatedOutput));
+          } catch {
+            console.warn("Failed to write accumulated execution output");
+          }
+        }
+      }
+    } else {
+      // Single command execution (original behaviour)
+      const claudeResult: ClaudeRunResult = await runClaude(
+        promptConfig.path,
+        claudeOptions,
+      );
+
+      claudeSuccess = claudeResult.conclusion === "success";
+      executionFile = claudeResult.executionFile;
+
+      if (claudeResult.executionFile) {
+        core.setOutput("execution_file", claudeResult.executionFile);
+      }
+      if (claudeResult.sessionId) {
+        core.setOutput("session_id", claudeResult.sessionId);
+      }
+      if (claudeResult.structuredOutput) {
+        core.setOutput("structured_output", claudeResult.structuredOutput);
+      }
+      core.setOutput("conclusion", claudeResult.conclusion);
     }
-    if (claudeResult.structuredOutput) {
-      core.setOutput("structured_output", claudeResult.structuredOutput);
-    }
-    core.setOutput("conclusion", claudeResult.conclusion);
   } catch (error) {
     const errorMessage = error instanceof Error ? error.message : String(error);
     // Only mark as prepare failure if we haven't completed the prepare phase
