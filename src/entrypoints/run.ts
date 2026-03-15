@@ -39,6 +39,7 @@ import { setupClaudeCodeSettings } from "../../base-action/src/setup-claude-code
 import { installPlugins } from "../../base-action/src/install-plugins";
 import { preparePrompt } from "../../base-action/src/prepare-prompt";
 import { runClaude } from "../../base-action/src/run-claude";
+import type { ClaudeOptions } from "../../base-action/src/run-claude";
 import type { ClaudeRunResult } from "../../base-action/src/run-claude-sdk";
 import { setExecutionFileOutputIfPresent } from "../../base-action/src/execution-file";
 
@@ -273,18 +274,22 @@ async function run() {
       promptFile,
     });
 
-    const claudeResult: ClaudeRunResult = await runClaude(promptConfig.path, {
+    const claudeOptions: ClaudeOptions = {
       claudeArgs: prepareResult.claudeArgs,
       appendSystemPrompt: process.env.APPEND_SYSTEM_PROMPT,
       model: process.env.ANTHROPIC_MODEL,
       pathToClaudeCodeExecutable: claudeExecutable,
       showFullOutput: process.env.INPUT_SHOW_FULL_OUTPUT,
-    });
+    };
+
+    const claudeResult: ClaudeRunResult = await runClaude(
+      promptConfig.path,
+      claudeOptions,
+    );
 
     claudeSuccess = claudeResult.conclusion === "success";
     executionFile = claudeResult.executionFile;
 
-    // Set action-level outputs
     if (claudeResult.executionFile) {
       core.setOutput("execution_file", claudeResult.executionFile);
     }

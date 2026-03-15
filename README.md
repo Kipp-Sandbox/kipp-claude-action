@@ -7,6 +7,24 @@
 
 ## Fork Changes
 
+### Slash Commands
+
+- **Slash command detection in both modes** -- Tag mode and agent mode each write a separate `claude-user-request.txt` alongside the prompt file. This enables the SDK's multi-block message path so slash commands are detected and processed by the CLI.
+- **Chaining commands across workflow steps** -- Run multiple commands sequentially with shared session context by chaining action steps. Use the `session_id` output on the first step and forward `--resume` via `claude_args` on subsequent steps:
+
+  ```yaml
+  - id: first
+    uses: anthropics/claude-code-action@v1
+    with:
+      prompt: /maintain deps auto
+  - uses: anthropics/claude-code-action@v1
+    with:
+      prompt: /ship auto
+      claude_args: --resume ${{ steps.first.outputs.session_id }}
+  ```
+
+  Each step pays its own setup overhead (Claude install, plugin install, GitHub data fetch). To queue or cancel overlapping `@claude` invocations on the same PR or issue, set `concurrency:` in your workflow; the action does not set one itself.
+
 ### Event and Auth Extensions
 
 - **Push event support** -- Adds `push` to the set of recognised automation event types, allowing the action to trigger on push events.
