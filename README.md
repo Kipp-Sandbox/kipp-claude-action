@@ -7,6 +7,11 @@
 
 ## Fork Changes
 
+### Event and Auth Extensions
+
+- **Push event support** -- Adds `push` to the set of recognised automation event types, allowing the action to trigger on push events.
+- **Automation event token handling** -- Push and schedule events short-circuit token setup and return the default workflow token immediately instead of attempting OIDC exchange.
+
 ### Fork Maintenance
 
 - **Upstream sync workflow** -- Manual `sync-upstream` workflow fetches upstream, identifies custom-only commits via patch-id comparison (dropping duplicates), cherry-picks them onto upstream, and force-pushes. Creates a backup branch before each sync for rollback safety. When a cherry-pick conflicts, the workflow installs Claude Code CLI and invokes Claude (via Azure AI Foundry) to resolve the conflict automatically. If Claude cannot resolve a conflict, the workflow fails and the backup branch remains for manual recovery.
