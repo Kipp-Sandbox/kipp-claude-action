@@ -25,6 +25,11 @@
 
   Each step pays its own setup overhead (Claude install, plugin install, GitHub data fetch). To queue or cancel overlapping `@claude` invocations on the same PR or issue, set `concurrency:` in your workflow; the action does not set one itself.
 
+### Reporting
+
+- **Safe report mode** -- The `display_report` input accepts `"safe"` in addition to `"true"` and `"false"`. Safe mode shows Claude's reasoning and a compact tool activity log (tool names, file paths, success/failure) but omits all tool results and sensitive parameters, making it suitable for public repos.
+- **AI summary header** -- When `display_report` is enabled, the step summary includes a concise AI-generated overview of what Claude did, along with aggregated cost and duration (including the summary call), above the detailed turn-by-turn report. Uses the `summary_model` input (default: `claude-haiku-4-5`) via the Claude SDK, which supports all configured providers (Direct Anthropic API, Azure Foundry, Bedrock, Vertex). Falls back to a static summary if the summary call fails.
+
 ### Event and Auth Extensions
 
 - **Push event support** -- Adds `push` to the set of recognised automation event types, allowing the action to trigger on push events.
