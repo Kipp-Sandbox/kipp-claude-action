@@ -118,4 +118,54 @@ describe("formatCostTable", () => {
     expect(result).toContain("| **Total** |");
     expect(result).not.toContain("Execution");
   });
+
+  it("renders step labels in place of Execution N", () => {
+    const steps: ExecutionStepDetail[] = [
+      { total_cost_usd: 0.25, duration_ms: 60000, label: "Audit" },
+      { total_cost_usd: 0.1256, duration_ms: 35200, label: "Review" },
+    ];
+    const result = formatCostTable(steps, baseSummary);
+
+    expect(result).toContain("| Audit |");
+    expect(result).toContain("| Review |");
+    expect(result).not.toContain("Execution 1");
+    expect(result).not.toContain("Execution 2");
+  });
+
+  it("renders a single labelled step using its label", () => {
+    const steps: ExecutionStepDetail[] = [
+      { total_cost_usd: 0.3756, duration_ms: 95200, label: "Audit" },
+    ];
+    const result = formatCostTable(steps, baseSummary);
+
+    expect(result).toContain("| Audit |");
+    expect(result).not.toContain("| Execution |");
+  });
+
+  it("falls back to Execution N per row when labels are partial", () => {
+    const steps: ExecutionStepDetail[] = [
+      { total_cost_usd: 0.25, duration_ms: 60000, label: "Audit" },
+      { total_cost_usd: 0.1256, duration_ms: 35200 },
+      { total_cost_usd: 0.08, duration_ms: 12000, label: "PR" },
+    ];
+    const result = formatCostTable(steps, baseSummary);
+
+    expect(result).toContain("| Audit |");
+    expect(result).toContain("| Execution 2 |");
+    expect(result).toContain("| PR |");
+  });
+
+  it("sanitises labels to keep the markdown table intact", () => {
+    const steps: ExecutionStepDetail[] = [
+      {
+        total_cost_usd: 0.1,
+        duration_ms: 1000,
+        label: "a|b`c<d\re",
+      },
+    ];
+    const result = formatCostTable(steps, baseSummary);
+
+    expect(result).toContain("| a\\|b\\`c&lt;de |");
+    expect(result).not.toContain("\r");
+  });
 });

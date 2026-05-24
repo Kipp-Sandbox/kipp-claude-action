@@ -9,6 +9,7 @@ export type ExecutionDetails = {
 export type ExecutionStepDetail = {
   total_cost_usd: number;
   duration_ms: number;
+  label?: string;
 };
 
 /**

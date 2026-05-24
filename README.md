@@ -10,7 +10,21 @@
 ### Slash Commands
 
 - **Slash command detection in both modes** -- Tag mode and agent mode each write a separate `claude-user-request.txt` alongside the prompt file. This enables the SDK's multi-block message path so slash commands are detected and processed by the CLI.
-- **Chaining commands across workflow steps** -- Run multiple commands sequentially with shared session context by chaining action steps. Use the `session_id` output on the first step and forward `--resume` via `claude_args` on subsequent steps:
+- **In-action prompt chaining via `<prompt>` tags** -- Wrap two or more prompts in `<prompt>...</prompt>` blocks within a single `prompt:` input to run them sequentially in one action invocation. Each prompt after the first resumes the prior session so Claude retains full conversation context. The action pays setup costs (install, auth, MCP, plugins) only once, and the tracking comment and step summary aggregate cost and duration across all prompts.
+
+  ```yaml
+  - uses: anthropics/claude-code-action@v1
+    with:
+      prompt: |
+        <prompt label="Audit">/maintain deps auto</prompt>
+        <prompt label="Ship">/ship auto</prompt>
+  ```
+
+  Each block may carry an optional `label="..."` attribute. Labels appear as the row name in the safe-mode step summary cost table (`Audit`, `Ship`, ...); unlabelled blocks fall back to `Execution N`. Label values may not contain `"` or newlines.
+
+  Honoured in both agent mode and tag mode (an `@claude` comment may contain multiple `<prompt>` blocks). Tags must be balanced, bodies non-empty, and no stray text may appear outside the blocks; malformed input fails the action before Claude runs. The chain stops on the first failed prompt. Mid-chain resume failures (rare within a single workflow job) abort the chain.
+
+- **Chaining commands across workflow steps** -- Alternative to `<prompt>` blocks for cases where each prompt needs its own action inputs (different `claude_args`, `model`, etc.). Use the `session_id` output on the first step and forward `--resume` via `claude_args` on subsequent steps:
 
   ```yaml
   - id: first
