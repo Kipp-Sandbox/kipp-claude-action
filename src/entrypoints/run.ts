@@ -7,10 +7,14 @@
  */
 
 import * as core from "@actions/core";
-import { dirname } from "path";
+import { dirname, join } from "path";
 import { spawn } from "child_process";
-import { appendFile } from "fs/promises";
+import { appendFile, writeFile } from "fs/promises";
 import { existsSync, readFileSync } from "fs";
+import {
+  splitPromptBlocks,
+  type PromptBlock,
+} from "../utils/extract-user-request";
 import { setupGitHubToken, WorkflowValidationSkipError } from "../github/token";
 import { checkWritePermissions } from "../github/validation/permissions";
 import { createOctokit } from "../github/api/client";
@@ -132,7 +136,11 @@ function staticFallbackSummary(data: Turn[]): string {
 /**
  * Build the report header with AI summary (or fallback) and cost/duration.
  */
-async function buildReportHeader(data: Turn[], safe: boolean): Promise<string> {
+async function buildReportHeader(
+  data: Turn[],
+  safe: boolean,
+  labels?: (string | undefined)[],
+): Promise<string> {
   const heading = safe
     ? "## 🤖 Claude Code Report (Safe Mode)\n\n"
     : "## Claude Code Report\n\n";
@@ -140,7 +148,10 @@ async function buildReportHeader(data: Turn[], safe: boolean): Promise<string> {
   const summary = await generateSummary(data);
   const summaryText = summary.text || staticFallbackSummary(data);
 
-  const steps = extractPerResultDetails(data);
+  const rawSteps = extractPerResultDetails(data);
+  const steps = labels
+    ? rawSteps.map((s, i) => ({ ...s, label: labels[i] }))
+    : rawSteps;
 
   let header = heading;
   header += `${summaryText}\n\n`;
@@ -160,6 +171,7 @@ async function buildReportHeader(data: Turn[], safe: boolean): Promise<string> {
 async function writeStepSummary(
   executionFile: string,
   safe: boolean,
+  labels?: (string | undefined)[],
 ): Promise<void> {
   const summaryFile = process.env.GITHUB_STEP_SUMMARY;
   if (!summaryFile) return;
@@ -168,7 +180,7 @@ async function writeStepSummary(
     const fileContent = readFileSync(executionFile, "utf-8");
     const data: Turn[] = JSON.parse(fileContent);
 
-    const header = await buildReportHeader(data, safe);
+    const header = await buildReportHeader(data, safe, labels);
     const body = formatTurnsFromData(data, safe, true);
     await appendFile(summaryFile, header + body);
     console.log("Successfully formatted Claude Code report");
@@ -207,6 +219,7 @@ async function run() {
   let claudeBranch: string | undefined;
   let baseBranch: string | undefined;
   let executionFile: string | undefined;
+  let chainedLabels: (string | undefined)[] | undefined;
   let claudeSuccess = false;
   let prepareSuccess = true;
   let prepareError: string | undefined;
@@ -343,24 +356,117 @@ async function run() {
       showFullOutput: process.env.INPUT_SHOW_FULL_OUTPUT,
     };
 
-    const claudeResult: ClaudeRunResult = await runClaude(
-      promptConfig.path,
-      claudeOptions,
-    );
+    // Check for multiple <prompt>...</prompt> blocks in the user request file.
+    // When present, run each prompt sequentially, resuming the prior session
+    // so Claude retains full conversation context across prompts.
+    const promptDir = dirname(promptConfig.path);
+    const userRequestPath = join(promptDir, "claude-user-request.txt");
+    let prompts: PromptBlock[] = [];
+    if (existsSync(userRequestPath)) {
+      const userRequestContent = readFileSync(userRequestPath, "utf-8");
+      prompts = splitPromptBlocks(userRequestContent);
+    }
 
-    claudeSuccess = claudeResult.conclusion === "success";
-    executionFile = claudeResult.executionFile;
+    if (prompts.length > 1) {
+      chainedLabels = prompts.map((p) => p.label);
+      const accumulatedOutput: Turn[] = [];
+      let lastClaudeResult: ClaudeRunResult | undefined;
+      let sessionId: string | undefined;
 
-    if (claudeResult.executionFile) {
-      core.setOutput("execution_file", claudeResult.executionFile);
+      for (let i = 0; i < prompts.length; i++) {
+        const prompt = prompts[i]!;
+        console.log(
+          `Running prompt ${i + 1}/${prompts.length}: ${prompt.text.split("\n")[0]}`,
+        );
+
+        if (i > 0) {
+          claudeOptions.resume = sessionId;
+        }
+
+        // Overwrite the user request file with the current prompt so
+        // base-action's createPromptConfig picks it up via the multi-block path.
+        await writeFile(userRequestPath, prompt.text);
+
+        const claudeResult = await runClaude(promptConfig.path, claudeOptions);
+        lastClaudeResult = claudeResult;
+
+        if (claudeResult.sessionId) {
+          sessionId = claudeResult.sessionId;
+        }
+
+        if (
+          claudeResult.executionFile &&
+          existsSync(claudeResult.executionFile)
+        ) {
+          try {
+            const data: Turn[] = JSON.parse(
+              readFileSync(claudeResult.executionFile, "utf-8"),
+            );
+            accumulatedOutput.push(...data);
+          } catch {
+            console.warn(
+              `Failed to parse execution output for prompt ${i + 1}`,
+            );
+          }
+        }
+
+        if (claudeResult.conclusion !== "success") {
+          console.log(
+            `Prompt ${i + 1} failed, stopping execution of remaining prompts`,
+          );
+          break;
+        }
+      }
+
+      if (lastClaudeResult) {
+        claudeSuccess = lastClaudeResult.conclusion === "success";
+        executionFile = lastClaudeResult.executionFile;
+
+        if (lastClaudeResult.executionFile) {
+          core.setOutput("execution_file", lastClaudeResult.executionFile);
+        }
+        if (lastClaudeResult.sessionId) {
+          core.setOutput("session_id", lastClaudeResult.sessionId);
+        }
+        if (lastClaudeResult.structuredOutput) {
+          core.setOutput(
+            "structured_output",
+            lastClaudeResult.structuredOutput,
+          );
+        }
+        core.setOutput("conclusion", lastClaudeResult.conclusion);
+
+        if (executionFile && accumulatedOutput.length > 0) {
+          try {
+            await writeFile(executionFile, JSON.stringify(accumulatedOutput));
+          } catch {
+            console.warn("Failed to write accumulated execution output");
+          }
+        }
+      }
+    } else {
+      if (prompts.length === 1 && prompts[0]!.label) {
+        chainedLabels = [prompts[0]!.label];
+      }
+      const claudeResult: ClaudeRunResult = await runClaude(
+        promptConfig.path,
+        claudeOptions,
+      );
+
+      claudeSuccess = claudeResult.conclusion === "success";
+      executionFile = claudeResult.executionFile;
+
+      if (claudeResult.executionFile) {
+        core.setOutput("execution_file", claudeResult.executionFile);
+      }
+      if (claudeResult.sessionId) {
+        core.setOutput("session_id", claudeResult.sessionId);
+      }
+      if (claudeResult.structuredOutput) {
+        core.setOutput("structured_output", claudeResult.structuredOutput);
+      }
+      core.setOutput("conclusion", claudeResult.conclusion);
     }
-    if (claudeResult.sessionId) {
-      core.setOutput("session_id", claudeResult.sessionId);
-    }
-    if (claudeResult.structuredOutput) {
-      core.setOutput("structured_output", claudeResult.structuredOutput);
-    }
-    core.setOutput("conclusion", claudeResult.conclusion);
   } catch (error) {
     const errorMessage = error instanceof Error ? error.message : String(error);
     executionFile ??= setExecutionFileOutputIfPresent();
@@ -405,9 +511,9 @@ async function run() {
     const reportMode = (process.env.DISPLAY_REPORT || "false").toLowerCase();
     if (executionFile && existsSync(executionFile)) {
       if (reportMode === "safe") {
-        await writeStepSummary(executionFile, true);
+        await writeStepSummary(executionFile, true, chainedLabels);
       } else if (reportMode === "true" || reportMode === "full") {
-        await writeStepSummary(executionFile, false);
+        await writeStepSummary(executionFile, false, chainedLabels);
       }
     }
 
